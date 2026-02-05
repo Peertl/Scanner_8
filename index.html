@@ -9,21 +9,18 @@
         #container { position: relative; width: 100vw; height: 100vh; }
         video, canvas { position: absolute; width: 100%; height: 100%; object-fit: cover; }
         
-        /* Die verbesserte Lupe */
+        /* Die Lupe */
         #magnifier { 
-            position: absolute; top: 130px; left: 50%; transform: translateX(-50%);
+            position: absolute; top: 120px; left: 50%; transform: translateX(-50%);
             width: 180px; height: 180px; border: 4px solid #007bff; border-radius: 90px;
             z-index: 100; overflow: hidden; display: none; background: #000;
             box-shadow: 0 0 30px rgba(0,0,0,0.8); pointer-events: none;
         }
-        #mag-canvas { width: 100%; height: 100%; image-rendering: pixelated; }
+        #mag-canvas { width: 100%; height: 100%; }
 
-        #ui-top { position: absolute; top: 0; width: 100%; z-index: 20; background: rgba(0,0,0,0.7); padding: 15px 0; text-align: center; border-bottom: 2px solid #007bff; }
+        #ui-top { position: absolute; top: 0; width: 100%; z-index: 20; background: rgba(0,0,0,0.8); padding: 15px 0; text-align: center; border-bottom: 2px solid #007bff; }
         .status { font-size: 1.1rem; font-weight: bold; color: #ffc107; margin-bottom: 5px; }
-        .instr { font-size: 0.9rem; color: #00d4ff; }
-        
-        .progress-bg { width: 70%; background: #333; height: 8px; margin: 10px auto; border-radius: 4px; overflow: hidden; }
-        #progress-fill { width: 0%; height: 100%; background: #28a745; transition: width 0.1s; }
+        .instr { font-size: 0.9rem; color: #00d4ff; padding: 0 10px; }
         
         .controls { position: absolute; bottom: 30px; width: 100%; z-index: 20; display: flex; justify-content: center; gap: 10px; }
         button { padding: 15px 20px; font-size: 1rem; border-radius: 12px; border: none; font-weight: bold; color: white; cursor: pointer; background: #444; }
@@ -35,8 +32,8 @@
 
 <div id="magnifier">
     <canvas id="mag-canvas" width="180" height="180"></canvas>
-    <div style="position:absolute; top:90px; left:0; width:180px; height:1px; background:red;"></div>
-    <div style="position:absolute; top:0; left:90px; width:1px; height:180px; background:red;"></div>
+    <div style="position:absolute; top:90px; left:0; width:180px; height:2px; background:rgba(255,0,0,0.5);"></div>
+    <div style="position:absolute; top:0; left:90px; width:2px; height:180px; background:rgba(255,0,0,0.5);"></div>
 </div>
 
 <div id="container">
@@ -45,129 +42,121 @@
 </div>
 
 <div id="ui-top">
-    <div id="status" class="status">Kamera startet...</div>
-    <div id="instr" class="instr">Suche A4 Blatt...</div>
-    <div class="progress-bg" id="p-bar"><div id="progress-fill"></div></div>
+    <div id="status" class="status">Initialisiere...</div>
+    <div id="instr" class="instr">Warte auf Kamera...</div>
 </div>
 
 <div class="controls">
     <button id="btn-main" onclick="handleMainAction()">FOTO AUFNEHMEN</button>
-    <button onclick="undo()">ZURÜCK</button>
+    <button onclick="undo()">RÜCKGÄNGIG</button>
     <button id="btn-reset" onclick="resetApp()">RESET</button>
 </div>
 
 <script>
-let state = 'SCAN'; // SCAN, SNAP, MEASURE, RESULT
-let pxPerCm = localStorage.getItem('px_cm_v14') ? parseFloat(localStorage.getItem('px_cm_v14')) : null;
-let calibSamples = [];
+// Zustände: CALIB_1, CALIB_2 (Blatt), SNAP (Kamera), MEASURE (Punkte setzen), RESULT
+let state = 'CALIB_1';
+let pxPerCm = localStorage.getItem('px_cm_pure') ? parseFloat(localStorage.getItem('px_cm_pure')) : null;
+if (pxPerCm) state = 'SNAP';
+
 let points = [];
-let activePoint = null;
+let calibPoints = [];
 let snapshot = null;
+let activePointIndex = -1;
 
 const video = document.getElementById('videoInput');
 const canvas = document.getElementById('canvasOutput');
-const ctx = canvas.getContext('2d', {alpha: false});
+const ctx = canvas.getContext('2d');
 const mag = document.getElementById('magnifier');
 const magCtx = document.getElementById('mag-canvas').getContext('2d');
 
 async function initCamera() {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: { ideal: 1280 } } });
-    video.srcObject = stream;
-    await video.play();
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    if (pxPerCm) state = 'SNAP';
-    updateUI();
-    requestAnimationFrame(mainLoop);
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+            video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } } 
+        });
+        video.srcObject = stream;
+        await video.play();
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        updateUI();
+        requestAnimationFrame(mainLoop);
+    } catch (err) {
+        document.getElementById('status').innerText = "Kamera-Fehler!";
+        alert("Bitte Kamera-Zugriff erlauben.");
+    }
 }
 
 function updateUI() {
     const s = document.getElementById('status');
     const ins = document.getElementById('instr');
-    const pb = document.getElementById('p-bar');
-    const btn = document.getElementById('btn-main');
-
-    if (state === 'SCAN') {
-        s.innerText = "PHASE 1: KALIBRIERUNG";
-        ins.innerText = "Bewege die Kamera über ein A4 Blatt";
-        pb.style.display = "block";
-        btn.style.display = "none";
-    } else if (state === 'SNAP') {
-        s.innerText = "PHASE 2: BEREIT";
-        ins.innerText = "Paket anvisieren und Foto machen";
-        pb.style.display = "none";
-        btn.style.display = "block";
-        btn.innerText = "FOTO AUFNEHMEN";
-    } else {
-        const labels = ["Basis-Ecke setzen", "Höhe setzen", "Breite (links) setzen", "Länge (rechts) setzen", "Fertig! Punkte zum Justieren ziehen"];
-        ins.innerText = labels[Math.min(points.length, 4)];
-        s.innerText = points.length < 4 ? "PUNKTE SETZEN" : "MESSERGEBNIS";
-        btn.style.display = points.length === 4 ? "block" : "none";
-        btn.innerText = "NEUES FOTO";
-    }
+    const b = document.getElementById('btn-main');
+    
+    const texts = {
+        'CALIB_1': ['KALIBRIERUNG', 'Tippe auf die linke Ecke der LANGEN Seite (A4)'],
+        'CALIB_2': ['KALIBRIERUNG', 'Tippe auf die rechte Ecke der LANGEN Seite (A4)'],
+        'SNAP': ['BEREIT', 'Paket anvisieren und Foto machen'],
+        'MEASURE': ['PUNKTE SETZEN', 'Setze die 4 Ecken des Pakets'],
+        'RESULT': ['ERGEBNIS', 'Du kannst Punkte ziehen, um sie zu verfeinern']
+    };
+    
+    const [title, instruction] = texts[state] || ["", ""];
+    s.innerText = title;
+    ins.innerText = instruction;
+    b.style.display = (state === 'SNAP' || state === 'RESULT') ? "block" : "none";
+    b.innerText = (state === 'SNAP') ? "FOTO AUFNEHMEN" : "NEUES FOTO";
 }
 
 function mainLoop() {
-    if (state === 'SCAN' || state === 'SNAP') {
+    if (state.startsWith('CALIB') || state === 'SNAP') {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        if (state === 'SCAN') fastDetectA4();
+        calibPoints.forEach(p => drawMarker(p, "#ffc107"));
     } else if (snapshot) {
         ctx.putImageData(snapshot, 0, 0);
-        drawGeometry();
+        drawParcel();
     }
     requestAnimationFrame(mainLoop);
 }
 
-// Schneller JavaScript-basierter Detektor (keine KI nötig)
-function fastDetectA4() {
-    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const data = imgData.data;
-    // Wir suchen nach einer großen hellen Fläche (A4 Blatt)
-    // Vereinfachte Logik für maximale Performance ohne Library
-    let brightness = 0;
-    let count = 0;
-    for (let i = 0; i < data.length; i += 40) { // Stichproben
-        brightness += (data[i] + data[i+1] + data[i+2]) / 3;
-        count++;
+function handleMainAction() {
+    if (state === 'SNAP') {
+        snapshot = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        state = 'MEASURE';
+    } else {
+        points = []; snapshot = null; state = 'SNAP';
     }
-    
-    // Simulierter Detektor: In einer echten Messung würde hier ein 
-    // kleiner Kantendetektor laufen. Da wir "sofort" starten wollen, 
-    // nehmen wir die stabilsten Kontrastübergänge.
-    // Falls ein Blatt erkannt wird (hier simuliert durch Kontrast):
-    const fakeDetection = true; 
-    if (fakeDetection) {
-        // Wir zeichnen ein Such-Viereck zur Orientierung
-        ctx.strokeStyle = "#00ff00"; ctx.lineWidth = 5;
-        ctx.strokeRect(canvas.width*0.2, canvas.height*0.2, canvas.width*0.6, canvas.height*0.6);
-        
-        calibSamples.push(canvas.width * 0.6 / 29.7); 
-        document.getElementById('progress-fill').style.width = (calibSamples.length * 2) + "%";
-        if (calibSamples.length >= 50) {
-            pxPerCm = calibSamples[25];
-            localStorage.setItem('px_cm_v14', pxPerCm);
-            state = 'SNAP'; updateUI();
-        }
-    }
+    updateUI();
 }
 
 canvas.addEventListener('touchstart', (e) => {
-    if (state !== 'MEASURE' && state !== 'RESULT') return;
     const pos = getTouchPos(e);
-    activePoint = points.find(p => Math.hypot(p.x - pos.x, p.y - pos.y) < 40);
-    if (!activePoint && points.length < 4) {
-        activePoint = {x: pos.x, y: pos.y};
-        points.push(activePoint);
+    if (state.startsWith('CALIB')) {
+        calibPoints.push(pos);
+        if (state === 'CALIB_1') state = 'CALIB_2';
+        else {
+            const d = Math.hypot(calibPoints[0].x - calibPoints[1].x, calibPoints[0].y - calibPoints[1].y);
+            pxPerCm = d / 29.7;
+            localStorage.setItem('px_cm_pure', pxPerCm);
+            state = 'SNAP';
+        }
+    } else if (state === 'MEASURE' || state === 'RESULT') {
+        activePointIndex = points.findIndex(p => Math.hypot(p.x - pos.x, p.y - pos.y) < 40);
+        if (activePointIndex === -1 && points.length < 4) {
+            points.push(pos);
+            activePointIndex = points.length - 1;
+        }
     }
     updateUI();
 });
 
 canvas.addEventListener('touchmove', (e) => {
-    if (!activePoint) return;
     e.preventDefault();
     const pos = getTouchPos(e);
-    activePoint.x = pos.x; activePoint.y = pos.y;
+    if (activePointIndex !== -1) {
+        points[activePointIndex] = pos;
+        if (points.length === 4) state = 'RESULT';
+    }
     
+    // Lupe anzeigen
     mag.style.display = 'block';
     const z = 80;
     magCtx.drawImage(canvas, pos.x - z/2, pos.y - z/2, z, z, 0, 0, 180, 180);
@@ -175,51 +164,46 @@ canvas.addEventListener('touchmove', (e) => {
 
 canvas.addEventListener('touchend', () => {
     mag.style.display = 'none';
-    activePoint = null;
-    if (points.length === 4) state = 'RESULT';
+    activePointIndex = -1;
     updateUI();
 });
 
 function getTouchPos(e) {
-    const rect = canvas.getBoundingClientRect();
     const t = e.touches[0];
+    const rect = canvas.getBoundingClientRect();
     return { x: (t.clientX - rect.left) * (canvas.width / rect.width), y: (t.clientY - rect.top) * (canvas.height / rect.height) };
 }
 
-function drawGeometry() {
-    points.forEach((p, i) => {
-        ctx.fillStyle = (p === activePoint) ? "red" : "white";
-        ctx.beginPath(); ctx.arc(p.x, p.y, 12, 0, Math.PI*2); ctx.fill();
-        ctx.fillStyle = "black"; ctx.font = "14px Arial"; ctx.fillText(i+1, p.x-4, p.y+5);
-    });
-    if (points.length >= 2) renderL(points[0], points[1], "#ff0", "H");
-    if (points.length >= 3) renderL(points[0], points[2], "#07f", "B");
+function drawMarker(p, col) {
+    ctx.fillStyle = col; ctx.beginPath(); ctx.arc(p.x, p.y, 10, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = "white"; ctx.lineWidth = 2; ctx.stroke();
+}
+
+function drawParcel() {
+    points.forEach((p, i) => drawMarker(p, (i === activePointIndex) ? "red" : "white"));
+    if (points.length >= 2) renderLine(points[0], points[1], "#ff0", "H");
+    if (points.length >= 3) renderLine(points[0], points[2], "#07f", "B");
     if (points.length >= 4) {
-        renderL(points[0], points[3], "#0f0", "L");
+        renderLine(points[0], points[3], "#0f0", "L");
         const p0=points[0], p1=points[1], p2=points[2], p3=points[3];
         const h={x:p1.x-p0.x, y:p1.y-p0.y}, b={x:p2.x-p0.x, y:p2.y-p0.y}, l={x:p3.x-p0.x, y:p3.y-p0.y};
-        ctx.setLineDash([5,5]); ctx.lineWidth=2;
+        ctx.setLineDash([5,5]); ctx.lineWidth=3;
+        const line=(a,b,c)=>{ctx.strokeStyle=c; ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();};
         line(p1, {x:p1.x+b.x, y:p1.y+b.y}, "#07f"); line(p1, {x:p1.x+l.x, y:p1.y+l.y}, "#0f0");
         line(p2, {x:p2.x+h.x, y:p2.y+h.y}, "#ff0"); line(p3, {x:p3.x+h.x, y:p3.y+h.y}, "#ff0");
     }
 }
 
-function renderL(p1, p2, col, lab) {
+function renderLine(p1, p2, col, lab) {
     const d = Math.hypot(p1.x-p2.x, p1.y-p2.y) / pxPerCm;
-    ctx.strokeStyle = col; ctx.lineWidth = 10; ctx.setLineDash([]);
+    ctx.strokeStyle = col; ctx.lineWidth = 12; ctx.setLineDash([]);
     ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
-    ctx.fillStyle = "black"; ctx.font = "bold 24px Arial";
-    ctx.fillText(`${lab}: ${d.toFixed(1)}cm`, (p1.x+p2.x)/2 - 40, (p1.y+p2.y)/2);
+    ctx.fillStyle = "black"; ctx.font = "bold 28px Arial";
+    ctx.fillText(`${lab}: ${d.toFixed(1)}cm`, (p1.x+p2.x)/2 - 30, (p1.y+p2.y)/2);
 }
 
-function line(a, b, c) { ctx.strokeStyle = c; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); }
-function handleMainAction() {
-    if (state === 'SNAP') { snapshot = ctx.getImageData(0, 0, canvas.width, canvas.height); state = 'MEASURE'; }
-    else { points = []; snapshot = null; state = 'SNAP'; }
-    updateUI();
-}
-function undo() { points.pop(); state = 'MEASURE'; updateUI(); }
-function resetApp() { localStorage.removeItem('px_cm_v14'); location.reload(); }
+function undo() { points.pop(); state = (points.length < 4) ? 'MEASURE' : 'RESULT'; updateUI(); }
+function resetApp() { localStorage.clear(); location.reload(); }
 
 window.onload = initCamera;
 </script>
