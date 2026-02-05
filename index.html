@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>3D Paket Messer Expert</title>
+    <script async src="https://docs.opencv.org/4.5.4/opencv.js" type="text/javascript"></script>
+    <style>
+        body { margin: 0; background: #000; font-family: 'Segoe UI', Roboto, sans-serif; overflow: hidden; color: white; touch-action: none; }
+        #container { position: relative; width: 100vw; height: 100vh; }
+        video { display: none; }
+        canvas { position: absolute; width: 100%; height: 100%; object-fit: cover; z-index: 5; }
+        
+        /* Verbesserte Lupe */
+        #magnifier { 
+            position: absolute; top: 140px; left: 50%; transform: translateX(-50%);
+            width: 200px; height: 200px; border: 4px solid #007bff; border-radius: 20px;
+            z-index: 100; overflow: hidden; display: none; background: #000;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.9); pointer-events: none;
+        }
+        #mag-canvas { width: 100%; height: 100%; image-rendering: pixelated; }
+
+        /* UI Styling */
+        #ui-top { position: absolute; top: 0; width: 100%; z-index: 20; background: rgba(0,0,0,0.85); padding: 20px 0; text-align: center; border-bottom: 2px solid #007bff; }
+        .status { font-size: 1.2rem; font-weight: bold; margin-bottom: 5px; }
+        .instruction { font-size: 0.9rem; color: #00d4ff; padding: 0 15px; min-height: 1.2em; }
+        
+        .progress-bg { width: 70%; background: #333; height: 10px; margin: 10px auto; border-radius: 5px; overflow: hidden; }
+        #progress-fill { width: 0%; height: 100%; background: #28a745; transition: width 0.2s; }
+        
+        #loading-screen { position: fixed; inset: 0; background: #111; z-index: 1000; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+        
+        .controls { position: absolute; bottom: 30px; width: 100%; z-index: 20; display: flex; justify-content: center; gap: 15px; }
+        button { padding: 15px 25px; font-size: 1rem; border-radius: 12px; border: none; font-weight: bold; color: white; cursor: pointer; background: #444; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+        #btn-main { background: #007bff; min-width: 160px; }
+        #btn-reset { background: #dc3545; }
+    </style>
+</head>
+<body>
+
+<div id="loading-screen">
+    <div style="font-size: 3rem; margin-bottom: 20px;">📦</div>
+    <p>KI-System lädt...</p>
+</div>
+
+<div id="magnifier">
+    <canvas id="mag-canvas" width="200" height="200"></canvas>
+    <!-- Fadenkreuz in Lupe -->
+    <div style="position:absolute; top:100px; left:0; width:200px; height:2px; background:rgba(255,0,0,0.5); pointer-events:none;"></div>
+    <div style="position:absolute; top:0; left:100px; width:2px; height:200px; background:rgba(255,0,0,0.5); pointer-events:none;"></div>
+</div>
+
+<div id="container">
+    <video id="videoInput" playsinline muted></video>
+    <canvas id="canvasOutput"></canvas>
+</div>
+
+<div id="ui-top">
+    <div id="status" class="status">Initialisiere...</div>
+    <div id="instruction" class="instruction">Warte auf Kamera...</div>
+    <div class="progress-bg" id="p-bar"><div id="progress-fill"></div></div>
+</div>
+
+<div class="controls">
+    <button id="btn-main" onclick="handleMainAction()">FOTO AUFNEHMEN</button>
+    <button style="background: #555;" onclick="resetPoints()">PUNKTE NEU</button>
+    <button id="btn-reset" onclick="hardReset()">RESET ALL</button>
+</div>
+
+<script>
+let state = 'SCAN'; // SCAN, READY_SNAP, MEASURE, RESULT
+let pxPerCm = localStorage.getItem('px_cm_v13') ? parseFloat(localStorage.getItem('px_cm_v13')) : null;
+let calibSamples = [];
+let points = []; // [{x, y}]
+let activePointIndex = -1;
+let snapshot = null;
+
+const video = document.getElementById('videoInput');
+const canvas = document.getElementById('canvasOutput');
+const ctx = canvas.getContext('2d', { alpha: false });
+const mag = document.getElementById('magnifier');
+const magCtx = document.getElementById('mag-canvas').getContext('2d');
+
+function onOpenCvReady() {
+    document.getElementById('loading-screen').style.display = 'none';
+    initCamera();
+}
+
+async function initCamera() {
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+            video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } } 
+        });
+        video.srcObject = stream;
+        await video.play();
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        state = pxPerCm ? 'READY_SNAP' : 'SCAN';
+        updateUI();
+        requestAnimationFrame(processFrame);
+    } catch (e) {
+        document.getElementById('status').innerText = "Kamera-Fehler!";
+    }
+}
+
+function updateUI() {
+    const s = document.getElementById('status');
+    const ins = document.getElementById('instruction');
+    const pb = document.getElementById('p-bar');
+    const btn = document.getElementById('btn-main');
+
+    if (state === 'SCAN') {
+        s.innerText = "PHASE 1: KALIBRIERUNG";
+        s.style.color = "#ffc107";
+        ins.innerText = "Bewege das Handy über ein A4 Blatt";
+        pb.style.display = "block";
+        btn.style.display = "none";
+    } else if (state === 'READY_SNAP') {
+        s.innerText = "PHASE 2: PAKET FOTOGRAFIEREN";
+        s.style.color = "#00ff00";
+        ins.innerText = "Positioniere das Paket und drücke den Knopf";
+        pb.style.display = "none";
+        btn.style.display = "block";
+        btn.innerText = "FOTO AUFNEHMEN";
+    } else if (state === 'MEASURE' || state === 'RESULT') {
+        const pCount = points.length;
+        btn.style.display = pCount === 4 ? "block" : "none";
+        btn.innerText = "NEUES FOTO";
+        
+        if (pCount === 0) ins.innerText = "Tippe die VORDERE UNTERE Ecke an";
+        else if (pCount === 1) ins.innerText = "Tippe die vordere OBERE Ecke an (HÖHE)";
+        else if (pCount === 2) ins.innerText = "Tippe die UNTERE LINKE Ecke an (BREITE)";
+        else if (pCount === 3) ins.innerText = "Tippe die UNTERE RECHTE Ecke an (LÄNGE)";
+        else ins.innerText = "Fertig! Du kannst Punkte zum Verfeinern ziehen.";
+        
+        if (state === 'RESULT') {
+            s.innerText = "MESSERGEBNIS";
+            s.style.color = "#00d4ff";
+        } else {
+            s.innerText = "PUNKTE SETZEN";
+            s.style.color = "#ffc107";
+        }
+    }
+}
+
+// Touch Logik
+canvas.addEventListener('touchstart', handleTouchStart);
+canvas.addEventListener('touchmove', handleTouchMove);
+canvas.addEventListener('touchend', handleTouchEnd);
+
+function handleTouchStart(e) {
+    if (state !== 'MEASURE' && state !== 'RESULT') return;
+    e.preventDefault();
+    const pos = getTouchPos(e);
+    
+    // Prüfen, ob ein existierender Punkt berührt wurde (Radius 30px)
+    activePointIndex = points.findIndex(p => Math.hypot(p.x - pos.x, p.y - pos.y) < 40);
+    
+    if (activePointIndex === -1 && points.length < 4) {
+        // Neuen Punkt hinzufügen
+        points.push(pos);
+        activePointIndex = points.length - 1;
+    }
+    
+    showMagnifier(pos);
+    updateUI();
+}
+
+function handleTouchMove(e) {
+    if (activePointIndex === -1) return;
+    e.preventDefault();
+    const pos = getTouchPos(e);
+    points[activePointIndex] = pos;
+    showMagnifier(pos);
+}
+
+function handleTouchEnd() {
+    mag.style.display = 'none';
+    activePointIndex = -1;
+    if (points.length === 4) state = 'RESULT';
+    updateUI();
+}
+
+function showMagnifier(pos) {
+    mag.style.display = 'block';
+    const zoomSize = 80; // Größe des Quell-Ausschnitts
+    magCtx.drawImage(canvas, pos.x - zoomSize/2, pos.y - zoomSize/2, zoomSize, zoomSize, 0, 0, 200, 200);
+}
+
+function getTouchPos(e) {
+    const t = e.touches[0];
+    const rect = canvas.getBoundingClientRect();
+    return {
+        x: (t.clientX - rect.left) * (canvas.width / rect.width),
+        y: (t.clientY - rect.top) * (canvas.height / rect.height)
+    };
+}
+
+function processFrame() {
+    if (state === 'SCAN' || state === 'READY_SNAP') {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        if (state === 'SCAN') autoDetectA4();
+    } else if (snapshot) {
+        ctx.putImageData(snapshot, 0, 0);
+        drawParcelOverlay();
+    }
+    requestAnimationFrame(processFrame);
+}
+
+function autoDetectA4() {
+    try {
+        let src = cv.imread(canvas);
+        let gray = new cv.Mat();
+        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+        cv.threshold(gray, gray, 100, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+        let contours = new cv.MatVector();
+        let hierarchy = new cv.Mat();
+        cv.findContours(gray, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+        for (let i = 0; i < contours.size(); ++i) {
+            let cnt = contours.get(i);
+            if (cv.contourArea(cnt) > 20000) {
+                let approx = new cv.Mat();
+                cv.approxPolyDP(cnt, approx, 0.02 * cv.arcLength(cnt, true), true);
+                if (approx.rows === 4) {
+                    drawCvContour(approx, "#00ff00");
+                    let d = Math.hypot(approx.data32S[0]-approx.data32S[2], approx.data32S[1]-approx.data32S[3]);
+                    calibSamples.push(d / 29.7);
+                    document.getElementById('progress-fill').style.width = (calibSamples.length / 40 * 100) + "%";
+                    if (calibSamples.length >= 40) {
+                        pxPerCm = calibSamples.sort((a,b)=>a-b)[20];
+                        localStorage.setItem('px_cm_v13', pxPerCm);
+                        state = 'READY_SNAP'; updateUI();
+                    }
+                }
+                approx.delete();
+            }
+        }
+        src.delete(); gray.delete(); contours.delete(); hierarchy.delete();
+    } catch(e) {}
+}
+
+function drawCvContour(approx, color) {
+    ctx.strokeStyle = color; ctx.lineWidth = 10;
+    ctx.beginPath(); ctx.moveTo(approx.data32S[0], approx.data32S[1]);
+    for(let i=1; i<4; i++) ctx.lineTo(approx.data32S[i*2], approx.data32S[i*2+1]);
+    ctx.closePath(); ctx.stroke();
+}
+
+function drawParcelOverlay() {
+    points.forEach((p, i) => {
+        ctx.fillStyle = (i === activePointIndex) ? "#ff4444" : "white";
+        ctx.beginPath(); ctx.arc(p.x, p.y, 14, 0, Math.PI*2); ctx.fill();
+        ctx.strokeStyle = "black"; ctx.lineWidth = 2; ctx.stroke();
+        // Index Zahl im Punkt
+        ctx.fillStyle = "black"; ctx.font = "bold 14px Arial"; ctx.textAlign = "center";
+        ctx.fillText(i+1, p.x, p.y + 5);
+    });
+
+    if (points.length >= 2) renderDim(points[0], points[1], "#ffff00", "H");
+    if (points.length >= 3) renderDim(points[0], points[2], "#007bff", "B");
+    if (points.length >= 4) {
+        renderDim(points[0], points[3], "#00ff00", "L");
+        // Geometrie Ergänzung
+        const p0=points[0], p1=points[1], p2=points[2], p3=points[3];
+        const h={x:p1.x-p0.x, y:p1.y-p0.y}, b={x:p2.x-p0.x, y:p2.y-p0.y}, l={x:p3.x-p0.x, y:p3.y-p0.y};
+        ctx.setLineDash([10, 10]); ctx.lineWidth = 4;
+        line(p1, {x:p1.x+b.x, y:p1.y+b.y}, "#007bff"); line(p1, {x:p1.x+l.x, y:p1.y+l.y}, "#00ff00");
+        line(p2, {x:p2.x+h.x, y:p2.y+h.y}, "#ffff00"); line(p3, {x:p3.x+h.x, y:p3.y+h.y}, "#ffff00");
+    }
+}
+
+function renderDim(p1, p2, col, label) {
+    const d = Math.hypot(p1.x-p2.x, p1.y-p2.y) / pxPerCm;
+    ctx.strokeStyle = col; ctx.lineWidth = 14; ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+    const mx=(p1.x+p2.x)/2, my=(p1.y+p2.y)/2;
+    ctx.fillStyle = "rgba(0,0,0,0.8)";
+    ctx.font = "bold 32px Arial";
+    ctx.fillText(`${label}: ${d.toFixed(1)}cm`, mx-40, my-20);
+}
+
+function line(pa, pb, col) { ctx.strokeStyle = col; ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke(); }
+function handleMainAction() {
+    if (state === 'READY_SNAP') {
+        snapshot = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        state = 'MEASURE';
+    } else {
+        resetPoints();
+        state = 'READY_SNAP';
+    }
+    updateUI();
+}
+function resetPoints() { points = []; state = 'MEASURE'; updateUI(); }
+function hardReset() { localStorage.removeItem('px_cm_v13'); location.reload(); }
+
+window.onload = () => {
+    if (typeof cv !== 'undefined' && cv.Mat) onOpenCvReady();
+    else window.cv = { onRuntimeInitialized: onOpenCvReady };
+};
+</script>
+</body>
+</html>
